@@ -1,6 +1,6 @@
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
-import time
 
 from fastapi.testclient import TestClient
 
@@ -20,7 +20,9 @@ class FailingGateway:
 
 
 def test_message_submission_returns_accepted_and_persists_streamed_reply(tmp_path: Path):
-    app = create_app(f"sqlite+aiosqlite:///{tmp_path / 'chat.db'}", FakeGateway(), "demo/free-model")
+    app = create_app(
+        f"sqlite+aiosqlite:///{tmp_path / 'chat.db'}", FakeGateway(), "demo/free-model"
+    )
 
     with TestClient(app) as client:
         conversation = client.post("/v1/conversations", json={"title": "Demo"}).json()
@@ -32,7 +34,10 @@ def test_message_submission_returns_accepted_and_persists_streamed_reply(tmp_pat
         deadline = time.monotonic() + 1
         while True:
             transcript = client.get(f"/v1/conversations/{conversation['id']}").json()
-            if transcript["generations"][0]["status"] == "completed" or time.monotonic() >= deadline:
+            if (
+                transcript["generations"][0]["status"] == "completed"
+                or time.monotonic() >= deadline
+            ):
                 break
             time.sleep(0.01)
 
@@ -42,7 +47,9 @@ def test_message_submission_returns_accepted_and_persists_streamed_reply(tmp_pat
 
 
 def test_provider_failure_retains_partial_assistant_output(tmp_path: Path):
-    app = create_app(f"sqlite+aiosqlite:///{tmp_path / 'chat.db'}", FailingGateway(), "demo/free-model")
+    app = create_app(
+        f"sqlite+aiosqlite:///{tmp_path / 'chat.db'}", FailingGateway(), "demo/free-model"
+    )
 
     with TestClient(app) as client:
         conversation_id = client.post("/v1/conversations", json={}).json()["id"]

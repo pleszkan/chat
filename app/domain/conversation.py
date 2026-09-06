@@ -69,8 +69,12 @@ class Conversation:
     ) -> Generation:
         if self.has_running_generation:
             raise GenerationAlreadyRunning("A generation is already running for this conversation")
-        self.messages.append(Message(assistant_message_id, MessageRole.ASSISTANT, "", len(self.messages), now))
-        generation = Generation(generation_id, assistant_message_id, model, GenerationStatus.RUNNING, now)
+        self.messages.append(
+            Message(assistant_message_id, MessageRole.ASSISTANT, "", len(self.messages), now)
+        )
+        generation = Generation(
+            generation_id, assistant_message_id, model, GenerationStatus.RUNNING, now
+        )
         self.generations.append(generation)
         self.updated_at = now
         return generation
