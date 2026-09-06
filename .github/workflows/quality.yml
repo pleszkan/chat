@@ -23,3 +23,11 @@ jobs:
       - run: uv run ruff format --check
       - run: uv run ruff check
       - run: uv run pytest -q
+
+  image-build:
+    needs: test-and-lint
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: docker build --tag fastapi-chat:ci .
