@@ -290,3 +290,29 @@ def test_jwt_codec_uses_injected_time_for_temporal_validation():
     assert codec.decode(token, issued_at).user_id == "user-1"
     with pytest.raises(AuthenticationFailed):
         codec.decode(token, issued_at + timedelta(minutes=16))
+
+
+def test_jwt_codec_rejects_non_finite_temporal_claims():
+    now = datetime.now(UTC)
+    secret = "x" * 64
+    codec = JWTAccessTokenCodec(secret, "hexagonal-chat", "hexagonal-chat-browser")
+    claims = {
+        "iss": "hexagonal-chat",
+        "aud": "hexagonal-chat-browser",
+        "sub": "user-1",
+        "role": "user",
+        "sid": "session-1",
+        "jti": "jti-1",
+    }
+
+    for issued_at, expires_at in (
+        (float("nan"), now.timestamp() + 900),
+        (now.timestamp() - 1, float("nan")),
+        (float("-inf"), now.timestamp() + 900),
+        (now.timestamp() - 1, float("inf")),
+    ):
+        token = jwt.encode(
+            {**claims, "iat": issued_at, "exp": expires_at}, secret, algorithm="HS256"
+        )
+        with pytest.raises(AuthenticationFailed):
+            codec.decode(token, now)

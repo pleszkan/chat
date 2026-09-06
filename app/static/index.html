@@ -228,7 +228,13 @@
         await streamEvents(
           `/v1/generations/${generation_id}/events?conversation_id=${encodeURIComponent(conversationId)}`,
           {
-            snapshot: (data) => { reply.textContent = data.text; },
+            snapshot: (data) => {
+              reply.textContent = data.text;
+              if (data.status === 'completed') status.textContent = 'Ready';
+              if (data.status === 'failed') {
+                status.textContent = data.error_message || 'The model provider could not complete this reply.';
+              }
+            },
             delta: (data) => { reply.textContent += data.text; messages.scrollTop = messages.scrollHeight; },
             completed: () => { status.textContent = 'Ready'; },
             failed: (data) => { status.textContent = data.message; }

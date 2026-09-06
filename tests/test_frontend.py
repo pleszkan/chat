@@ -45,3 +45,5 @@ def test_root_serves_the_chat_frontend(tmp_path: Path):
     assert 'id="auth-providers"' in response.text
     assert 'id="current-user"' in response.text
     assert 'id="logout"' in response.text
+    assert "data.status === 'completed'" in response.text
+    assert "data.status === 'failed'" in response.text

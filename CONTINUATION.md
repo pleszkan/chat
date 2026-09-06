@@ -13,12 +13,13 @@ git status --short
 Expected branch: `feat/pluggable-auth`.
 
 Base commit: `b8f511ae87b0e0a9ac81eaaedc45e3940f34f134` on `master`.
-All authentication changes are currently uncommitted. The main checkout was not
-modified by this work.
+The initial authentication implementation and first review fixes are committed
+on this branch. The main checkout was not modified by this work.
 
-## Current verification state
+## Verification before the final review wave
 
-The following checks passed immediately before this handoff was written:
+The following checks passed after the first review fixes and before this final
+review wave:
 
 ```bash
 uv run ruff format
@@ -29,9 +30,9 @@ uv run python -m compileall -q app main.py
 
 Results:
 
-- Formatting: 30 files unchanged
+- Formatting: 31 files unchanged
 - Lint: all checks passed
-- Tests: 53 passed, 1 warning
+- Tests: 57 passed, 1 warning
 - Compile check: passed
 
 The warning is an upstream Starlette deprecation warning emitted through
@@ -115,7 +116,8 @@ present in that snapshot.
    preservation on provider failure. Automated tests already cover these flows
    with test providers; this step validates browser/cookie/proxy/provider wiring.
 
-5. If the review is satisfactory, commit from this worktree, for example:
+5. If the final review identifies further fixes, commit them from this worktree,
+   for example:
 
    ```bash
    git add README.md app pyproject.toml tests uv.lock CONTINUATION.md
@@ -124,8 +126,8 @@ present in that snapshot.
 
 6. Then choose the desired integration path: merge into `master`, push the
    feature branch and open a PR, or keep the worktree for further development.
-   Do not delete the worktree before committing or otherwise preserving its
-   uncommitted changes.
+   Do not delete the worktree before committing any further fixes or otherwise
+   preserving its branch.
 
 ## Useful focused test commands
 

@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from datetime import datetime, timedelta
+from math import isfinite
 from uuid import uuid4
 
 import jwt
@@ -70,6 +71,12 @@ class JWTAccessTokenCodec:
                 or isinstance(expires_at, bool)
                 or not isinstance(expires_at, int | float)
             ):
+                raise ValueError("Invalid temporal claim")
+            try:
+                finite_temporal_claims = isfinite(issued_at) and isfinite(expires_at)
+            except OverflowError:
+                finite_temporal_claims = False
+            if not finite_temporal_claims:
                 raise ValueError("Invalid temporal claim")
             current_time = now.timestamp()
             if issued_at > current_time or expires_at <= current_time:

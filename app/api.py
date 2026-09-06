@@ -167,9 +167,11 @@ def create_app(
     async def current_principal(
         authorization: Annotated[str | None, Header()] = None,
     ) -> Principal:
-        if authorization is None or not authorization.startswith("Bearer "):
+        if authorization is None:
             raise unauthorized()
-        token = authorization.removeprefix("Bearer ")
+        scheme, separator, token = authorization.partition(" ")
+        if not separator or scheme.lower() != "bearer":
+            raise unauthorized()
         if not token or " " in token:
             raise unauthorized("Invalid access token")
         try:
@@ -433,12 +435,45 @@ def create_app(
             if generation.status is GenerationStatus.RUNNING
             else None
         )
+        if queue is not None:
+            # Register before re-reading so a terminal publication cannot fall between
+            # the snapshot read and broker registration.
+            try:
+                latest_conversation = await chat_service.get_conversation(
+                    principal, conversation_id
+                )
+            except ConversationNotFound as error:
+                event_broker.unsubscribe(generation_id, queue)
+                raise HTTPException(404, "Generation not found") from error
+            generation = next(
+                (item for item in latest_conversation.generations if item.id == generation_id),
+                None,
+            )
+            if generation is None:
+                event_broker.unsubscribe(generation_id, queue)
+                raise HTTPException(404, "Generation not found")
+            assistant = next(
+                item
+                for item in latest_conversation.messages
+                if item.id == generation.assistant_message_id
+            )
+            # Deltas published before the refreshed snapshot are already represented in it.
+            terminal_event: dict | None = None
+            while True:
+                try:
+                    pending_event = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if pending_event["event"] in {"completed", "failed"}:
+                    terminal_event = pending_event
+            if terminal_event is not None:
+                queue.put_nowait(terminal_event)
 
         async def events() -> AsyncIterator[str]:
             try:
                 snapshot = {"text": assistant.text, "status": generation.status.value}
                 yield f"event: snapshot\ndata: {json.dumps(snapshot)}\n\n"
-                if queue is None:
+                if queue is None or generation.status is not GenerationStatus.RUNNING:
                     return
                 while True:
                     event = await queue.get()

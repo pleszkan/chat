@@ -1,3 +1,5 @@
+import asyncio
+import json
 import sqlite3
 import time
 from collections.abc import AsyncIterator
@@ -7,8 +9,11 @@ from urllib.parse import parse_qs, urlencode, urlparse
 import pytest
 from fastapi.testclient import TestClient
 
+import app.api as api_module
+from app.adapters.event_broker import GenerationEventBroker
 from app.api import create_app
 from app.domain.auth import FederatedProfile
+from app.domain.conversation import GenerationStatus
 from app.domain.errors import ProviderAuthenticationError
 
 
@@ -22,6 +27,39 @@ class FailingGateway:
     async def stream(self, model: str, messages: list[dict[str, str]]) -> AsyncIterator[str]:
         yield "Partial"
         raise RuntimeError("upstream unavailable")
+
+
+class BlockingGateway:
+    async def stream(self, model: str, messages: list[dict[str, str]]) -> AsyncIterator[str]:
+        await asyncio.Future()
+        yield "unreachable"
+
+
+class ReplayBroker(GenerationEventBroker):
+    """Replay the terminal publication that raced with the stale snapshot read."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.terminal_events: dict[str, dict] = {}
+
+    def publish(self, generation_id: str, event: dict) -> None:
+        super().publish(generation_id, event)
+        if event["event"] in {"completed", "failed"}:
+            self.terminal_events[generation_id] = event
+
+    def subscribe(self, generation_id: str):
+        queue = super().subscribe(generation_id)
+        if event := self.terminal_events.get(generation_id):
+            queue.put_nowait(event)
+        return queue
+
+
+class SnapshotDeltaBroker(GenerationEventBroker):
+    def subscribe(self, generation_id: str):
+        queue = super().subscribe(generation_id)
+        queue.put_nowait({"event": "delta", "text": "already-in-snapshot"})
+        queue.put_nowait({"event": "completed"})
+        return queue
 
 
 class FakeProvider:
@@ -233,6 +271,17 @@ def test_chat_endpoints_require_a_valid_bearer_token(tmp_path: Path):
     assert invalid.headers["www-authenticate"] == "Bearer"
 
 
+def test_bearer_scheme_matching_is_case_insensitive(tmp_path: Path):
+    app, _, _ = make_app(tmp_path)
+
+    with TestClient(app, base_url="https://chat.example") as client:
+        token = login(client)
+        response = client.get("/v1/auth/me", headers={"Authorization": f"bEaReR {token}"})
+
+    assert response.status_code == 200
+    assert response.json()["display_name"] == "Ada"
+
+
 def test_refresh_and_logout_reject_cross_origin_posts(tmp_path: Path):
     app, _, _ = make_app(tmp_path)
 
@@ -420,6 +469,78 @@ def test_message_submission_returns_accepted_and_persists_streamed_reply(tmp_pat
     assert [message["text"] for message in transcript["messages"]] == ["Hi", "Hello there"]
     assert "event: snapshot" in events.text
     assert mismatched.status_code == 404
+
+
+def test_sse_rechecks_after_terminal_publication_races_a_stale_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(api_module, "GenerationEventBroker", ReplayBroker)
+    original_get = api_module.SqlAlchemyConversationRepository.get
+    stale_read = False
+
+    async def get_with_one_stale_snapshot(repository, conversation_id: str):
+        nonlocal stale_read
+        conversation = await original_get(repository, conversation_id)
+        if stale_read:
+            stale_read = False
+            conversation.generations[0].status = GenerationStatus.RUNNING
+        return conversation
+
+    monkeypatch.setattr(
+        api_module.SqlAlchemyConversationRepository, "get", get_with_one_stale_snapshot
+    )
+    app, _, _ = make_app(tmp_path)
+
+    with TestClient(app, base_url="https://chat.example") as client:
+        token = login(client)
+        conversation = client.post("/v1/conversations", json={}, headers=bearer(token)).json()
+        accepted = client.post(
+            f"/v1/conversations/{conversation['id']}/messages",
+            json={"text": "Hi"},
+            headers=bearer(token),
+        )
+        deadline = time.monotonic() + 1
+        while True:
+            transcript = client.get(
+                f"/v1/conversations/{conversation['id']}", headers=bearer(token)
+            ).json()
+            if transcript["generations"][0]["status"] == "completed":
+                break
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        stale_read = True
+        events = client.get(
+            f"/v1/generations/{accepted.json()['generation_id']}/events",
+            params={"conversation_id": conversation["id"]},
+            headers=bearer(token),
+        )
+
+    first_frame = events.text.split("\n\n", 1)[0]
+    snapshot = json.loads(first_frame.split("data: ", 1)[1])
+    assert snapshot["status"] == "completed"
+
+
+def test_sse_does_not_replay_deltas_already_in_rechecked_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(api_module, "GenerationEventBroker", SnapshotDeltaBroker)
+    app, _, _ = make_app(tmp_path, BlockingGateway())
+
+    with TestClient(app, base_url="https://chat.example") as client:
+        token = login(client)
+        conversation = client.post("/v1/conversations", json={}, headers=bearer(token)).json()
+        accepted = client.post(
+            f"/v1/conversations/{conversation['id']}/messages",
+            json={"text": "Hi"},
+            headers=bearer(token),
+        )
+        events = client.get(
+            f"/v1/generations/{accepted.json()['generation_id']}/events",
+            params={"conversation_id": conversation["id"]},
+            headers=bearer(token),
+        )
+
+    assert "event: delta" not in events.text
 
 
 def test_provider_failure_retains_partial_assistant_output(tmp_path: Path):

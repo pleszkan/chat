@@ -28,6 +28,10 @@ needs only the `identify` scope.
 This release intentionally has no migration from the former anonymous schema. Delete the disposable
 `chat.db` before first deployment and let the service recreate it.
 
+Generation workers and the SSE event broker are process-local. Run the service as a single
+application process (`--workers 1`) with one active instance; do not add multiple workers or
+replicas until the broker is replaced with shared durable event delivery.
+
 ## Authentication and authorization
 
 - Access JWTs are HS256 tokens with a 15-minute lifetime and remain valid until expiry.
