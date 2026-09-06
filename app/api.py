@@ -1,10 +1,10 @@
 import asyncio
 import json
 import os
-from pathlib import Path
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Annotated
 from uuid import uuid4
 
@@ -33,12 +33,28 @@ def _conversation_payload(conversation: Conversation) -> dict:
         "id": conversation.id,
         "title": conversation.title,
         "created_at": conversation.created_at.isoformat(),
-        "messages": [{"id": m.id, "role": m.role.value, "text": m.text, "sequence": m.sequence} for m in conversation.messages],
-        "generations": [{"id": g.id, "status": g.status.value, "assistant_message_id": g.assistant_message_id, "error_code": g.error_code, "error_message": g.error_message} for g in conversation.generations],
+        "messages": [
+            {"id": m.id, "role": m.role.value, "text": m.text, "sequence": m.sequence}
+            for m in conversation.messages
+        ],
+        "generations": [
+            {
+                "id": g.id,
+                "status": g.status.value,
+                "assistant_message_id": g.assistant_message_id,
+                "error_code": g.error_code,
+                "error_message": g.error_message,
+            }
+            for g in conversation.generations
+        ],
     }
 
 
-def create_app(database_url: str | None = None, gateway: OpenRouterGateway | None = None, model: str | None = None) -> FastAPI:
+def create_app(
+    database_url: str | None = None,
+    gateway: OpenRouterGateway | None = None,
+    model: str | None = None,
+) -> FastAPI:
     database_url = database_url or os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./chat.db")
     model = model or os.getenv("OPENROUTER_MODEL", "minimax/minimax-m3:free")
     engine = create_async_engine(database_url)
@@ -47,6 +63,7 @@ def create_app(database_url: str | None = None, gateway: OpenRouterGateway | Non
     gateway = gateway or OpenRouterGateway(os.environ["OPENROUTER_API_KEY"])
     subscribers: dict[str, set[asyncio.Queue[dict]]] = {}
     idempotency: dict[tuple[str, str], str] = {}
+    background_tasks: set[asyncio.Task[None]] = set()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -63,15 +80,31 @@ def create_app(database_url: str | None = None, gateway: OpenRouterGateway | Non
     async def run_generation(conversation_id: str, generation: Generation) -> None:
         try:
             conversation = await service.get_conversation(conversation_id)
-            messages = [{"role": item.role.value, "content": item.text} for item in conversation.messages if item.id != generation.assistant_message_id]
+            messages = [
+                {"role": item.role.value, "content": item.text}
+                for item in conversation.messages
+                if item.id != generation.assistant_message_id
+            ]
             async for chunk in gateway.stream(generation.model, messages):
                 await service.checkpoint(conversation_id, generation.assistant_message_id, chunk)
                 await publish(generation.id, {"event": "delta", "text": chunk})
             await service.complete(conversation_id, generation.id)
             await publish(generation.id, {"event": "completed"})
         except Exception:
-            await service.fail(conversation_id, generation.id, "provider_error", "The model provider could not complete this reply.")
-            await publish(generation.id, {"event": "failed", "code": "provider_error", "message": "The model provider could not complete this reply."})
+            await service.fail(
+                conversation_id,
+                generation.id,
+                "provider_error",
+                "The model provider could not complete this reply.",
+            )
+            await publish(
+                generation.id,
+                {
+                    "event": "failed",
+                    "code": "provider_error",
+                    "message": "The model provider could not complete this reply.",
+                },
+            )
 
     @app.post("/v1/conversations", status_code=201)
     async def create_conversation(request: CreateConversationRequest) -> dict:
@@ -95,7 +128,11 @@ def create_app(database_url: str | None = None, gateway: OpenRouterGateway | Non
         return Response(status_code=204)
 
     @app.post("/v1/conversations/{conversation_id}/messages", status_code=202)
-    async def send_message(conversation_id: str, request: SendMessageRequest, idempotency_key: Annotated[str | None, Header()] = None) -> dict:
+    async def send_message(
+        conversation_id: str,
+        request: SendMessageRequest,
+        idempotency_key: Annotated[str | None, Header()] = None,
+    ) -> dict:
         if idempotency_key and (conversation_id, idempotency_key) in idempotency:
             return {"generation_id": idempotency[(conversation_id, idempotency_key)]}
         try:
@@ -106,7 +143,9 @@ def create_app(database_url: str | None = None, gateway: OpenRouterGateway | Non
             raise HTTPException(409, str(error)) from error
         if idempotency_key:
             idempotency[(conversation_id, idempotency_key)] = generation.id
-        asyncio.create_task(run_generation(conversation_id, generation))
+        task = asyncio.create_task(run_generation(conversation_id, generation))
+        background_tasks.add(task)
+        task.add_done_callback(background_tasks.discard)
         await asyncio.sleep(0)
         return {"generation_id": generation.id, "status": generation.status.value}
 
@@ -114,11 +153,16 @@ def create_app(database_url: str | None = None, gateway: OpenRouterGateway | Non
     async def generation_events(generation_id: str, conversation_id: str) -> StreamingResponse:
         async def events() -> AsyncIterator[str]:
             conversation = await service.get_conversation(conversation_id)
-            generation = next((item for item in conversation.generations if item.id == generation_id), None)
+            generation = next(
+                (item for item in conversation.generations if item.id == generation_id), None
+            )
             if generation is None:
                 return
-            assistant = next(item for item in conversation.messages if item.id == generation.assistant_message_id)
-            yield f"event: snapshot\ndata: {json.dumps({'text': assistant.text, 'status': generation.status.value})}\n\n"
+            assistant = next(
+                item for item in conversation.messages if item.id == generation.assistant_message_id
+            )
+            snapshot = {"text": assistant.text, "status": generation.status.value}
+            yield f"event: snapshot\ndata: {json.dumps(snapshot)}\n\n"
             if generation.status is not GenerationStatus.RUNNING:
                 return
             queue: asyncio.Queue[dict] = asyncio.Queue()
@@ -126,12 +170,14 @@ def create_app(database_url: str | None = None, gateway: OpenRouterGateway | Non
             try:
                 while True:
                     event = await queue.get()
-                    yield f"event: {event['event']}\ndata: {json.dumps({key: value for key, value in event.items() if key != 'event'})}\n\n"
+                    event_data = {key: value for key, value in event.items() if key != "event"}
+                    yield f"event: {event['event']}\ndata: {json.dumps(event_data)}\n\n"
                     if event["event"] in {"completed", "failed"}:
                         return
             finally:
                 subscribers.get(generation_id, set()).discard(queue)
+
         return StreamingResponse(events(), media_type="text/event-stream")
 
-    app.frontend("/", directory=str(Path(__file__).parent.parent / "dist"))
+    app.frontend("/", directory=str(Path(__file__).parent / "static"))
     return app

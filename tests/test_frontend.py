@@ -11,7 +11,9 @@ class FakeGateway:
 
 
 def test_root_serves_the_chat_frontend(tmp_path: Path):
-    app = create_app(f"sqlite+aiosqlite:///{tmp_path / 'chat.db'}", FakeGateway(), "demo/free-model")
+    app = create_app(
+        f"sqlite+aiosqlite:///{tmp_path / 'chat.db'}", FakeGateway(), "demo/free-model"
+    )
 
     with TestClient(app) as client:
         response = client.get("/")

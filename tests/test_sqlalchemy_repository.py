@@ -15,7 +15,9 @@ async def test_repository_round_trips_ordered_messages_and_partial_generation():
     now = datetime(2026, 9, 4, tzinfo=UTC)
     conversation = Conversation.create("conversation-1", now, "A chat")
     conversation.add_user_message("user-1", "Hello", now)
-    generation = conversation.start_generation("generation-1", "assistant-1", "demo/free-model", now)
+    generation = conversation.start_generation(
+        "generation-1", "assistant-1", "demo/free-model", now
+    )
     conversation.append_assistant_text("assistant-1", "Partial answer", now)
     conversation.fail_generation(generation.id, "provider_error", "Unavailable", now)
 

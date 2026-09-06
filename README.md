@@ -4,6 +4,8 @@ FastAPI backend for an anonymous chat demo. Conversation rules live in the domai
 
 ## Run locally
 
+This project requires Python 3.14 and uses [uv](https://docs.astral.sh/uv/).
+
 ```bash
 export OPENROUTER_API_KEY="..."
 export OPENROUTER_MODEL="meta-llama/llama-3.3-70b-instruct:free"
@@ -27,5 +29,19 @@ The generation worker checkpoints every provider text chunk before broadcasting 
 
 ```bash
 uv run pytest -q
+```
+
+## Code quality
+
+```bash
+uv run ruff format --check
+uv run ruff check
+```
+
+To apply Ruff's safe fixes locally:
+
+```bash
+uv run ruff format
+uv run ruff check --fix
 ```
 # chat

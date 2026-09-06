@@ -23,13 +23,18 @@ async def test_start_turn_persists_user_message_and_running_generation_before_st
     now = datetime(2026, 9, 4, tzinfo=UTC)
     conversation = Conversation.create("conversation-1", now)
     await repository.save(conversation)
-    service = ChatService(repository, lambda: now, ids=iter(["user-1", "generation-1", "assistant-1"]).__next__)
+    service = ChatService(
+        repository, lambda: now, ids=iter(["user-1", "generation-1", "assistant-1"]).__next__
+    )
 
     generation = await service.start_turn("conversation-1", "Hello", "demo/free-model")
 
     saved = await repository.get("conversation-1")
     assert generation.status is GenerationStatus.RUNNING
-    assert [(message.role, message.text) for message in saved.messages] == [("user", "Hello"), ("assistant", "")]
+    assert [(message.role, message.text) for message in saved.messages] == [
+        ("user", "Hello"),
+        ("assistant", ""),
+    ]
 
 
 @pytest.mark.asyncio
