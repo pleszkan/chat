@@ -153,6 +153,37 @@ def test_parallel_oauth_attempts_keep_separate_browser_bindings(tmp_path: Path):
     assert second_callback.status_code == 307
 
 
+@pytest.mark.parametrize("rejection", [{"error": "access_denied"}, {}])
+def test_rejected_oauth_callback_consumes_state_and_binding(
+    tmp_path: Path, rejection: dict[str, str]
+):
+    app, _, _ = make_app(tmp_path)
+
+    with TestClient(app, base_url="https://chat.example") as client:
+        start = client.get("/v1/auth/oauth/discord/start", follow_redirects=False)
+        state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
+        cookie_name = f"oauth_binding_{state}"
+        binding = client.cookies.get(cookie_name)
+        rejected = client.get(
+            "/v1/auth/oauth/discord/callback",
+            params={"state": state, **rejection},
+            follow_redirects=False,
+        )
+        client.cookies.set(
+            cookie_name,
+            binding,
+            path="/v1/auth/oauth/discord/callback",
+        )
+        retry = client.get(
+            "/v1/auth/oauth/discord/callback",
+            params={"code": "oauth-code", "state": state},
+            follow_redirects=False,
+        )
+
+    assert rejected.status_code == 400
+    assert retry.status_code == 400
+
+
 def test_oauth_provider_failure_returns_only_a_generic_error(tmp_path: Path):
     app, _, provider = make_app(tmp_path)
 
@@ -169,6 +200,24 @@ def test_oauth_provider_failure_returns_only_a_generic_error(tmp_path: Path):
     assert callback.status_code == 400
     assert callback.json() == {"detail": "OAuth sign-in failed"}
     assert "sensitive" not in callback.text
+
+
+def test_state_bearing_auth_responses_are_not_cacheable(tmp_path: Path):
+    app, _, _ = make_app(tmp_path)
+
+    with TestClient(app, base_url="https://chat.example") as client:
+        start = client.get("/v1/auth/oauth/discord/start", follow_redirects=False)
+        state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
+        callback = client.get(
+            "/v1/auth/oauth/discord/callback",
+            params={"code": "oauth-code", "state": state},
+            follow_redirects=False,
+        )
+        logout = client.post("/v1/auth/logout", headers={"Origin": "https://chat.example"})
+
+    assert start.headers["cache-control"] == "no-store"
+    assert callback.headers["cache-control"] == "no-store"
+    assert logout.headers["cache-control"] == "no-store"
 
 
 def test_chat_endpoints_require_a_valid_bearer_token(tmp_path: Path):

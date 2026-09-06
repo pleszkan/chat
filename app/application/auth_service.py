@@ -90,13 +90,7 @@ class AuthService:
         redirect_uri: str,
     ) -> AuthResult:
         provider = self._provider(provider_id)
-        now = self.clock()
-        valid = await self.repository.consume_oauth_transaction(
-            self._hash(state), self._hash(browser_binding), provider_id, now
-        )
-        if not valid:
-            self.logger.warning("auth.login_failed", extra={"provider": provider_id})
-            raise AuthenticationFailed("OAuth sign-in failed")
+        now = await self._consume_oauth_transaction(provider_id, state, browser_binding)
         try:
             profile = await provider.authenticate(code, redirect_uri)
         except ProviderAuthenticationError:
@@ -124,6 +118,9 @@ class AuthService:
             extra={"provider": provider_id, "user_id": user.id, "session_id": family_id},
         )
         return self._result(user, family_id, 0, refresh_secret, now)
+
+    async def reject_oauth(self, provider_id: str, state: str, browser_binding: str) -> None:
+        await self._consume_oauth_transaction(provider_id, state, browser_binding)
 
     async def refresh(self, refresh_token: str) -> AuthResult:
         family_id, generation, current_secret = self._parse_refresh_token(refresh_token)
@@ -177,6 +174,19 @@ class AuthService:
         if provider is None:
             raise AuthenticationFailed("OAuth sign-in failed")
         return provider
+
+    async def _consume_oauth_transaction(
+        self, provider_id: str, state: str, browser_binding: str
+    ) -> datetime:
+        self._provider(provider_id)
+        now = self.clock()
+        valid = await self.repository.consume_oauth_transaction(
+            self._hash(state), self._hash(browser_binding), provider_id, now
+        )
+        if not valid:
+            self.logger.warning("auth.login_failed", extra={"provider": provider_id})
+            raise AuthenticationFailed("OAuth sign-in failed")
+        return now
 
     def _result(
         self, user: User, family_id: str, generation: int, refresh_secret: str, now: datetime

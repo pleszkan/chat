@@ -240,7 +240,11 @@ def create_app(
             started = await auth_service.begin_oauth(provider_id, redirect_uri(provider_id))
         except AuthenticationFailed as error:
             raise HTTPException(404, "Authentication provider not found") from error
-        response = RedirectResponse(started.authorization_url, status_code=307)
+        response = RedirectResponse(
+            started.authorization_url,
+            status_code=307,
+            headers={"Cache-Control": "no-store"},
+        )
         response.set_cookie(
             oauth_binding_cookie(started.state),
             started.browser_binding,
@@ -262,7 +266,10 @@ def create_app(
         binding_cookie_name = oauth_binding_cookie(state) if state else None
         browser_binding = request.cookies.get(binding_cookie_name) if binding_cookie_name else None
         try:
-            if not code or not state or not browser_binding or request.query_params.get("error"):
+            if not state or not browser_binding:
+                raise AuthenticationFailed("OAuth sign-in failed")
+            if not code or request.query_params.get("error"):
+                await auth_service.reject_oauth(provider_id, state, browser_binding)
                 raise AuthenticationFailed("OAuth sign-in failed")
             result = await auth_service.complete_oauth(
                 provider_id,
@@ -284,6 +291,7 @@ def create_app(
                 httponly=True,
                 samesite="strict",
             )
+        response.headers["Cache-Control"] = "no-store"
         if binding_cookie_name:
             response.delete_cookie(
                 binding_cookie_name,
@@ -323,7 +331,7 @@ def create_app(
         chat_refresh: Annotated[str | None, Cookie()] = None,
     ) -> Response:
         await auth_service.logout(chat_refresh)
-        response = Response(status_code=204)
+        response = Response(status_code=204, headers={"Cache-Control": "no-store"})
         response.delete_cookie(
             "chat_refresh", path="/v1/auth", secure=True, httponly=True, samesite="strict"
         )
