@@ -7,7 +7,8 @@
   <style>
     :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
     body { margin: 0; background: Canvas; color: CanvasText; }
-    .shell { display: grid; grid-template-columns: 220px minmax(0, 760px); min-height: 100dvh; max-width: 1000px; margin: auto; }
+    [hidden] { display: none !important; }
+    .shell { display: grid; grid-template-columns: 240px minmax(0, 760px); min-height: 100dvh; max-width: 1040px; margin: auto; }
     aside { border-right: 1px solid color-mix(in srgb, CanvasText 20%, Canvas); padding: 1rem .75rem; }
     main { box-sizing: border-box; display: flex; flex-direction: column; min-height: 100dvh; padding: 1rem; }
     h1 { font-size: 1.25rem; margin: 0 0 .25rem; }
@@ -18,24 +19,38 @@
     .assistant { align-self: flex-start; background: color-mix(in srgb, CanvasText 10%, Canvas); }
     form { display: flex; gap: .5rem; margin-top: 1rem; }
     input { flex: 1; min-width: 0; padding: .75rem; border-radius: .5rem; border: 1px solid GrayText; font: inherit; }
-    button { padding: .75rem 1rem; border: 0; border-radius: .5rem; background: #2563eb; color: white; font: inherit; cursor: pointer; }
+    button, .provider { box-sizing: border-box; display: inline-block; padding: .75rem 1rem; border: 0; border-radius: .5rem; background: #2563eb; color: white; font: inherit; cursor: pointer; text-decoration: none; }
     button:disabled { opacity: .6; cursor: wait; }
     #new-chat { width: 100%; margin-bottom: .75rem; }
     #conversation-list { display: flex; flex-direction: column; gap: .25rem; }
     .conversation { width: 100%; padding: .6rem; background: transparent; color: CanvasText; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .conversation.active { background: color-mix(in srgb, #2563eb 20%, Canvas); }
+    .account { display: flex; align-items: center; gap: .5rem; margin-bottom: 1rem; font-size: .9rem; }
+    #current-user { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    #logout { padding: .45rem .65rem; background: transparent; color: CanvasText; border: 1px solid GrayText; }
+    #signed-out { box-sizing: border-box; display: grid; place-content: center; gap: 1rem; min-height: 100dvh; max-width: 32rem; margin: auto; padding: 2rem; text-align: center; }
+    #auth-providers { display: flex; justify-content: center; gap: .75rem; }
     @media (max-width: 640px) { .shell { display: block; } aside { border-right: 0; border-bottom: 1px solid color-mix(in srgb, CanvasText 20%, Canvas); } #conversation-list { flex-direction: row; overflow-x: auto; } .conversation { min-width: 9rem; } }
   </style>
 </head>
 <body>
-  <div class="shell">
+  <section id="signed-out" hidden>
+    <h1>Hexagonal Chat</h1>
+    <p>Sign in to start chatting.</p>
+    <div id="auth-providers"></div>
+  </section>
+  <div class="shell" id="chat-shell" hidden>
     <aside>
+      <div class="account">
+        <span id="current-user"></span>
+        <button id="logout" type="button">Log out</button>
+      </div>
       <button id="new-chat" type="button">New chat</button>
       <nav id="conversation-list" aria-label="Conversations"></nav>
     </aside>
     <main>
       <h1>Hexagonal Chat</h1>
-      <p id="status">Creating conversation…</p>
+      <p id="status">Loading…</p>
       <section id="messages" aria-live="polite"></section>
       <form id="message-form">
         <input id="message" autocomplete="off" placeholder="Ask something" required>
@@ -44,6 +59,11 @@
     </main>
   </div>
   <script>
+    const signedOut = document.querySelector('#signed-out');
+    const chatShell = document.querySelector('#chat-shell');
+    const providersElement = document.querySelector('#auth-providers');
+    const currentUser = document.querySelector('#current-user');
+    const logout = document.querySelector('#logout');
     const messages = document.querySelector('#messages');
     const form = document.querySelector('#message-form');
     const input = document.querySelector('#message');
@@ -51,7 +71,67 @@
     const status = document.querySelector('#status');
     const conversationList = document.querySelector('#conversation-list');
     const newChat = document.querySelector('#new-chat');
+    let accessToken = null;
+    let refreshPromise = null;
     let conversationId;
+
+    function showSignedOut() {
+      accessToken = null;
+      conversationId = undefined;
+      chatShell.hidden = true;
+      signedOut.hidden = false;
+    }
+
+    function showSignedIn(user) {
+      currentUser.textContent = `${user.display_name}${user.role === 'admin' ? ' (admin)' : ''}`;
+      signedOut.hidden = true;
+      chatShell.hidden = false;
+    }
+
+    async function refreshAccess() {
+      if (refreshPromise) return refreshPromise;
+      const rotate = async () => {
+        const response = await fetch('/v1/auth/refresh', {
+          method: 'POST', credentials: 'same-origin'
+        });
+        if (!response.ok) return null;
+        const session = await response.json();
+        accessToken = session.access_token;
+        showSignedIn(session.user);
+        return session;
+      };
+      const coordinatedRotate = () => navigator.locks
+        ? navigator.locks.request('hexagonal-chat-refresh', rotate)
+        : rotate();
+      refreshPromise = coordinatedRotate().finally(() => { refreshPromise = null; });
+      return refreshPromise;
+    }
+
+    async function apiFetch(url, options = {}, retry = true) {
+      const headers = new Headers(options.headers || {});
+      if (accessToken) headers.set('Authorization', `Bearer ${accessToken}`);
+      const response = await fetch(url, { ...options, headers, credentials: 'same-origin' });
+      if (response.status !== 401 || !retry) return response;
+      accessToken = null;
+      if (!await refreshAccess()) {
+        showSignedOut();
+        return response;
+      }
+      return apiFetch(url, options, false);
+    }
+
+    async function renderProviders() {
+      const response = await fetch('/v1/auth/providers');
+      if (!response.ok) return;
+      const providers = await response.json();
+      providersElement.replaceChildren(...providers.map((provider) => {
+        const link = document.createElement('a');
+        link.className = 'provider';
+        link.href = provider.start_url;
+        link.textContent = `Continue with ${provider.display_name}`;
+        return link;
+      }));
+    }
 
     function addMessage(role, text = '') {
       const element = document.createElement('article');
@@ -67,8 +147,8 @@
     }
 
     async function refreshConversations() {
-      const response = await fetch('/v1/conversations');
-      if (!response.ok) return;
+      const response = await apiFetch('/v1/conversations');
+      if (!response.ok) return [];
       const conversations = await response.json();
       conversationList.replaceChildren(...conversations.map((conversation) => {
         const button = document.createElement('button');
@@ -78,10 +158,11 @@
         button.addEventListener('click', () => loadConversation(conversation.id));
         return button;
       }));
+      return conversations;
     }
 
     async function loadConversation(id) {
-      const response = await fetch(`/v1/conversations/${id}`);
+      const response = await apiFetch(`/v1/conversations/${id}`);
       if (!response.ok) return;
       const conversation = await response.json();
       conversationId = conversation.id;
@@ -92,13 +173,39 @@
     }
 
     async function createConversation() {
-      const response = await fetch('/v1/conversations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      const response = await apiFetch('/v1/conversations', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+      });
       if (!response.ok) throw new Error('Could not create a conversation.');
       conversationId = (await response.json()).id;
       messages.replaceChildren();
       status.textContent = 'Ready';
       await refreshConversations();
       input.focus();
+    }
+
+    async function streamEvents(url, handlers) {
+      const response = await apiFetch(url, { headers: { Accept: 'text/event-stream' } });
+      if (!response.ok || !response.body) throw new Error('Could not open reply stream.');
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { value, done } = await reader.read();
+        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+        const frames = buffer.split('\n\n');
+        buffer = frames.pop();
+        for (const frame of frames) {
+          let eventName = 'message';
+          const data = [];
+          for (const line of frame.split('\n')) {
+            if (line.startsWith('event:')) eventName = line.slice(6).trim();
+            if (line.startsWith('data:')) data.push(line.slice(5).trimStart());
+          }
+          if (handlers[eventName]) handlers[eventName](JSON.parse(data.join('\n') || '{}'));
+        }
+        if (done) return;
+      }
     }
 
     form.addEventListener('submit', async (event) => {
@@ -111,27 +218,64 @@
       send.disabled = true;
       status.textContent = 'Thinking…';
       try {
-        const response = await fetch(`/v1/conversations/${conversationId}/messages`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() }, body: JSON.stringify({ text })
+        const response = await apiFetch(`/v1/conversations/${conversationId}/messages`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() },
+          body: JSON.stringify({ text })
         });
         if (!response.ok) throw new Error((await response.json()).detail || 'Could not send message.');
         const { generation_id } = await response.json();
-        const stream = new EventSource(`/v1/generations/${generation_id}/events?conversation_id=${conversationId}`);
-        stream.addEventListener('snapshot', (event) => { reply.textContent = JSON.parse(event.data).text; });
-        stream.addEventListener('delta', (event) => { reply.textContent += JSON.parse(event.data).text; messages.scrollTop = messages.scrollHeight; });
-        stream.addEventListener('completed', () => { stream.close(); status.textContent = 'Ready'; send.disabled = false; input.focus(); });
-        stream.addEventListener('failed', (event) => { stream.close(); status.textContent = JSON.parse(event.data).message; send.disabled = false; input.focus(); });
-        stream.onerror = () => { stream.close(); status.textContent = 'Connection lost; reload the conversation to see the saved reply.'; send.disabled = false; };
+        await streamEvents(
+          `/v1/generations/${generation_id}/events?conversation_id=${encodeURIComponent(conversationId)}`,
+          {
+            snapshot: (data) => { reply.textContent = data.text; },
+            delta: (data) => { reply.textContent += data.text; messages.scrollTop = messages.scrollHeight; },
+            completed: () => { status.textContent = 'Ready'; },
+            failed: (data) => { status.textContent = data.message; }
+          }
+        );
         await refreshConversations();
       } catch (error) {
-        reply.textContent = error.message;
-        status.textContent = 'Could not send message.';
+        if (!reply.textContent) reply.textContent = error.message;
+        status.textContent = 'Connection lost; reload the conversation to see the saved reply.';
+      } finally {
         send.disabled = false;
+        input.focus();
       }
     });
 
-    newChat.addEventListener('click', () => { status.textContent = 'Creating conversation…'; createConversation().catch((error) => { status.textContent = error.message; }); });
-    createConversation().catch((error) => { status.textContent = error.message; });
+    newChat.addEventListener('click', () => {
+      status.textContent = 'Creating conversation…';
+      createConversation().catch((error) => { status.textContent = error.message; });
+    });
+
+    logout.addEventListener('click', async () => {
+      const response = await fetch('/v1/auth/logout', {
+        method: 'POST', credentials: 'same-origin'
+      });
+      if (!response.ok) {
+        status.textContent = 'Could not log out. Please try again.';
+        return;
+      }
+      showSignedOut();
+      await renderProviders();
+    });
+
+    async function bootstrap() {
+      if (!await refreshAccess()) {
+        showSignedOut();
+        await renderProviders();
+        return;
+      }
+      const conversations = await refreshConversations();
+      if (conversations.length) await loadConversation(conversations[0].id);
+      else await createConversation();
+    }
+
+    bootstrap().catch(() => {
+      showSignedOut();
+      renderProviders();
+    });
   </script>
 </body>
 </html>

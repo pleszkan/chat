@@ -2,12 +2,22 @@ from datetime import UTC, datetime
 
 import pytest
 
+from app.domain.auth import Principal, UserRole
 from app.domain.conversation import Conversation, GenerationStatus, MessageRole
 from app.domain.errors import GenerationAlreadyRunning
 
 
+def test_principal_is_immutable():
+    principal = Principal("user-1", "Ada", None, UserRole.USER, "session-1")
+
+    with pytest.raises(AttributeError):
+        principal.role = UserRole.ADMIN
+
+
 def test_conversation_rejects_a_second_user_turn_while_generation_is_running():
-    conversation = Conversation.create("conversation-1", datetime(2026, 9, 4, tzinfo=UTC))
+    conversation = Conversation.create(
+        "conversation-1", "owner-1", datetime(2026, 9, 4, tzinfo=UTC)
+    )
     conversation.add_user_message("message-1", "Hello", datetime(2026, 9, 4, tzinfo=UTC))
     conversation.start_generation(
         "generation-1", "message-2", "demo/free-model", datetime(2026, 9, 4, tzinfo=UTC)
@@ -19,7 +29,7 @@ def test_conversation_rejects_a_second_user_turn_while_generation_is_running():
 
 def test_generation_checkpoints_partial_text_and_completes():
     now = datetime(2026, 9, 4, tzinfo=UTC)
-    conversation = Conversation.create("conversation-1", now)
+    conversation = Conversation.create("conversation-1", "owner-1", now)
     conversation.add_user_message("message-1", "Hello", now)
     generation = conversation.start_generation("generation-1", "message-2", "demo/free-model", now)
 
