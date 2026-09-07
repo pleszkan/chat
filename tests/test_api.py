@@ -176,6 +176,36 @@ def test_auth_flow_sets_secure_cookies_and_returns_current_user(tmp_path: Path):
     assert me.json()["role"] == "user"
 
 
+def test_account_switch_does_not_reuse_identity_scoped_get_responses(tmp_path: Path):
+    app, _, provider = make_app(tmp_path)
+
+    with TestClient(app, base_url="https://chat.example") as client:
+        first_token = login(client)
+        first_me = client.get("/v1/auth/me", headers=bearer(first_token))
+        conversation = client.post(
+            "/v1/conversations", json={"title": "First account"}, headers=bearer(first_token)
+        ).json()
+        first_list = client.get("/v1/conversations", headers=bearer(first_token))
+        first_detail = client.get(
+            f"/v1/conversations/{conversation['id']}", headers=bearer(first_token)
+        )
+
+        client.cookies.clear()
+        provider.subject = "discord-user-2"
+        provider.display_name_value = "Grace"
+        second_token = login(client)
+        second_me = client.get("/v1/auth/me", headers=bearer(second_token))
+        second_list = client.get("/v1/conversations", headers=bearer(second_token))
+
+    assert first_me.json()["display_name"] == "Ada"
+    assert first_list.json()[0]["title"] == "First account"
+    assert first_detail.json()["owner_id"] == first_list.json()[0]["owner_id"]
+    assert second_me.json()["display_name"] == "Grace"
+    assert second_list.json() == []
+    for response in (first_me, first_list, first_detail, second_me, second_list):
+        assert response.headers["cache-control"] == "no-store"
+
+
 def test_parallel_oauth_attempts_keep_separate_browser_bindings(tmp_path: Path):
     app, _, _ = make_app(tmp_path)
 

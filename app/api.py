@@ -88,6 +88,10 @@ def _conversation_payload(conversation: Conversation) -> dict:
     }
 
 
+def _protected_json_response(content: object) -> JSONResponse:
+    return JSONResponse(content, headers={"Cache-Control": "no-store"})
+
+
 def _validated_app_origin(value: str) -> str:
     origin = value.rstrip("/")
     parsed = urlsplit(origin)
@@ -354,9 +358,13 @@ def create_app(
         return response
 
     @app.get("/v1/auth/me")
-    async def current_user(principal: Annotated[Principal, Depends(current_principal)]) -> dict:
+    async def current_user(
+        principal: Annotated[Principal, Depends(current_principal)],
+    ) -> JSONResponse:
         try:
-            return _user_payload(await auth_service.current_user(principal))
+            return _protected_json_response(
+                _user_payload(await auth_service.current_user(principal))
+            )
         except AuthenticationFailed as error:
             raise unauthorized() from error
 
@@ -372,19 +380,24 @@ def create_app(
     @app.get("/v1/conversations")
     async def list_conversations(
         principal: Annotated[Principal, Depends(current_principal)],
-    ) -> list[dict]:
-        return [
-            _conversation_payload(item) for item in await chat_service.list_conversations(principal)
-        ]
+    ) -> JSONResponse:
+        return _protected_json_response(
+            [
+                _conversation_payload(item)
+                for item in await chat_service.list_conversations(principal)
+            ]
+        )
 
     @app.get("/v1/conversations/{conversation_id}")
     async def get_conversation(
         conversation_id: str,
         principal: Annotated[Principal, Depends(current_principal)],
-    ) -> dict:
+    ) -> JSONResponse:
         try:
-            return _conversation_payload(
-                await chat_service.get_conversation(principal, conversation_id)
+            return _protected_json_response(
+                _conversation_payload(
+                    await chat_service.get_conversation(principal, conversation_id)
+                )
             )
         except ConversationNotFound as error:
             raise HTTPException(404, "Conversation not found") from error
