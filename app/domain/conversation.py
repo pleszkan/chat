@@ -42,6 +42,7 @@ class Generation:
 @dataclass
 class Conversation:
     id: str
+    owner_id: str
     created_at: datetime
     updated_at: datetime
     title: str | None = None
@@ -49,8 +50,16 @@ class Conversation:
     generations: list[Generation] = field(default_factory=list)
 
     @classmethod
-    def create(cls, conversation_id: str, now: datetime, title: str | None = None) -> Self:
-        return cls(id=conversation_id, created_at=now, updated_at=now, title=title)
+    def create(
+        cls, conversation_id: str, owner_id: str, now: datetime, title: str | None = None
+    ) -> Self:
+        return cls(
+            id=conversation_id,
+            owner_id=owner_id,
+            created_at=now,
+            updated_at=now,
+            title=title,
+        )
 
     @property
     def has_running_generation(self) -> bool:
