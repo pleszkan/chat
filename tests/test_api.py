@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sqlite3
+import threading
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -30,7 +31,12 @@ class FailingGateway:
 
 
 class BlockingGateway:
+    def __init__(self, started: threading.Event | None = None) -> None:
+        self.started = started
+
     async def stream(self, model: str, messages: list[dict[str, str]]) -> AsyncIterator[str]:
+        if self.started is not None:
+            self.started.set()
         await asyncio.Future()
         yield "unreachable"
 
@@ -692,7 +698,8 @@ def test_provider_failure_retains_partial_assistant_output(tmp_path: Path):
 
 
 def test_shutdown_fails_active_generation(tmp_path: Path):
-    app, database_path, _ = make_app(tmp_path, BlockingGateway())
+    started = threading.Event()
+    app, database_path, _ = make_app(tmp_path, BlockingGateway(started))
 
     with TestClient(app, base_url="https://chat.example") as client:
         token = login(client)
@@ -706,6 +713,7 @@ def test_shutdown_fails_active_generation(tmp_path: Path):
         )
 
         assert accepted.status_code == 202
+        assert started.wait(5)
         with sqlite3.connect(database_path) as connection:
             status = connection.execute(
                 "SELECT status FROM generations WHERE id = ?",
