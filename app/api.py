@@ -270,6 +270,14 @@ def create_app(
                 event_broker.publish(generation.id, {"event": "delta", "text": chunk})
             await generation_service.complete(conversation_id, generation.id)
             event_broker.publish(generation.id, {"event": "completed"})
+        except asyncio.CancelledError:
+            await generation_service.fail(
+                conversation_id,
+                generation.id,
+                "cancelled",
+                "Generation cancelled during application shutdown.",
+            )
+            raise
         except Exception:
             generation_logger.exception(
                 "generation.failed",

@@ -691,6 +691,37 @@ def test_provider_failure_retains_partial_assistant_output(tmp_path: Path):
     assert transcript["generations"][0]["error_code"] == "provider_error"
 
 
+def test_shutdown_fails_active_generation(tmp_path: Path):
+    app, database_path, _ = make_app(tmp_path, BlockingGateway())
+
+    with TestClient(app, base_url="https://chat.example") as client:
+        token = login(client)
+        conversation_id = client.post("/v1/conversations", json={}, headers=bearer(token)).json()[
+            "id"
+        ]
+        accepted = client.post(
+            f"/v1/conversations/{conversation_id}/messages",
+            json={"text": "Hi"},
+            headers=bearer(token),
+        )
+
+        assert accepted.status_code == 202
+        with sqlite3.connect(database_path) as connection:
+            status = connection.execute(
+                "SELECT status FROM generations WHERE id = ?",
+                (accepted.json()["generation_id"],),
+            ).fetchone()
+        assert status == ("running",)
+
+    with sqlite3.connect(database_path) as connection:
+        generation = connection.execute(
+            "SELECT status, error_code FROM generations WHERE id = ?",
+            (accepted.json()["generation_id"],),
+        ).fetchone()
+
+    assert generation == ("failed", "cancelled")
+
+
 def test_provider_failure_is_logged_with_generation_context(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ):
