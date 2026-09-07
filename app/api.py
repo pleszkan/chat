@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -34,6 +35,8 @@ from app.domain.errors import (
     GenerationAlreadyRunning,
     ProviderAuthenticationError,
 )
+
+generation_logger = logging.getLogger("chat.generation")
 
 
 class CreateConversationRequest(BaseModel):
@@ -210,6 +213,14 @@ def create_app(
             await generation_service.complete(conversation_id, generation.id)
             event_broker.publish(generation.id, {"event": "completed"})
         except Exception:
+            generation_logger.exception(
+                "generation.failed",
+                extra={
+                    "conversation_id": conversation_id,
+                    "generation_id": generation.id,
+                    "model": generation.model,
+                },
+            )
             await generation_service.fail(
                 conversation_id,
                 generation.id,

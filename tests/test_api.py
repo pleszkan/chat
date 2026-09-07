@@ -567,3 +567,41 @@ def test_provider_failure_retains_partial_assistant_output(tmp_path: Path):
 
     assert transcript["messages"][-1]["text"] == "Partial"
     assert transcript["generations"][0]["error_code"] == "provider_error"
+
+
+def test_provider_failure_is_logged_with_generation_context(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    app, _, _ = make_app(tmp_path, FailingGateway())
+
+    with (
+        caplog.at_level("ERROR", logger="chat.generation"),
+        TestClient(app, base_url="https://chat.example") as client,
+    ):
+        token = login(client)
+        conversation_id = client.post("/v1/conversations", json={}, headers=bearer(token)).json()[
+            "id"
+        ]
+        client.post(
+            f"/v1/conversations/{conversation_id}/messages",
+            json={"text": "Hi"},
+            headers=bearer(token),
+        )
+        deadline = time.monotonic() + 1
+        while True:
+            transcript = client.get(
+                f"/v1/conversations/{conversation_id}", headers=bearer(token)
+            ).json()
+            if transcript["generations"][0]["status"] == "failed":
+                break
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+
+    records = [record for record in caplog.records if record.name == "chat.generation"]
+    assert len(records) == 1
+    assert records[0].getMessage() == "generation.failed"
+    assert records[0].conversation_id == conversation_id
+    assert records[0].generation_id == transcript["generations"][0]["id"]
+    assert records[0].model == "demo/free-model"
+    assert records[0].exc_info is not None
+    assert "upstream unavailable" in caplog.text
