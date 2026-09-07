@@ -296,6 +296,44 @@ def test_state_bearing_auth_responses_are_not_cacheable(tmp_path: Path):
     assert logout.headers["cache-control"] == "no-store"
 
 
+def test_idempotency_store_purges_expired_entries_on_access():
+    current_time = 0.0
+    store = api_module._BoundedTTLStore[str, str](
+        max_size=2, ttl_seconds=10, clock=lambda: current_time
+    )
+
+    store.set("request-1", "generation-1")
+    current_time = 10.0
+
+    assert store.get("request-1") is None
+
+
+def test_idempotency_store_evicts_oldest_entry_at_capacity():
+    store = api_module._BoundedTTLStore[str, str](max_size=2, ttl_seconds=10, clock=lambda: 0.0)
+
+    store.set("request-1", "generation-1")
+    store.set("request-2", "generation-2")
+    store.set("request-3", "generation-3")
+
+    assert store.get("request-1") is None
+    assert store.get("request-2") == "generation-2"
+    assert store.get("request-3") == "generation-3"
+
+
+def test_idempotency_store_purges_expired_entries_on_insertion():
+    current_time = 0.0
+    store = api_module._BoundedTTLStore[str, str](
+        max_size=1, ttl_seconds=10, clock=lambda: current_time
+    )
+
+    store.set("request-1", "generation-1")
+    current_time = 10.0
+    store.set("request-2", "generation-2")
+
+    assert store.get("request-1") is None
+    assert store.get("request-2") == "generation-2"
+
+
 def test_chat_endpoints_require_a_valid_bearer_token(tmp_path: Path):
     app, _, _ = make_app(tmp_path)
 
@@ -476,6 +514,11 @@ def test_message_submission_returns_accepted_and_persists_streamed_reply(tmp_pat
             json={"text": "Hi"},
             headers={**bearer(token), "Idempotency-Key": "request-1"},
         )
+        duplicate = client.post(
+            f"/v1/conversations/{conversation['id']}/messages",
+            json={"text": "Different text"},
+            headers={**bearer(token), "Idempotency-Key": "request-1"},
+        )
         deadline = time.monotonic() + 1
         while True:
             transcript = client.get(
@@ -500,8 +543,12 @@ def test_message_submission_returns_accepted_and_persists_streamed_reply(tmp_pat
         )
 
     assert accepted.status_code == 202
+    assert duplicate.status_code == 202
+    assert duplicate.json() == {"generation_id": accepted.json()["generation_id"]}
     assert [message["text"] for message in transcript["messages"]] == ["Hi", "Hello there"]
     assert "event: snapshot" in events.text
+    assert events.headers["cache-control"] == "no-store"
+    assert events.headers["x-accel-buffering"] == "no"
     assert mismatched.status_code == 404
 
 

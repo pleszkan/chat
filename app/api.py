@@ -2,11 +2,13 @@ import asyncio
 import json
 import logging
 import os
-from collections.abc import AsyncIterator
+from collections import OrderedDict
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated
+from time import monotonic
+from typing import Annotated, TypeVar
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -37,6 +39,52 @@ from app.domain.errors import (
 )
 
 generation_logger = logging.getLogger("chat.generation")
+
+IDEMPOTENCY_MAX_ENTRIES = 10_000
+IDEMPOTENCY_TTL_SECONDS = 15 * 60
+
+StoreKey = TypeVar("StoreKey")
+StoreValue = TypeVar("StoreValue")
+
+
+class _BoundedTTLStore[StoreKey, StoreValue]:
+    def __init__(
+        self,
+        *,
+        max_size: int,
+        ttl_seconds: float,
+        clock: Callable[[], float] = monotonic,
+    ) -> None:
+        if max_size < 1:
+            raise ValueError("max_size must be positive")
+        if ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be positive")
+        self._max_size = max_size
+        self._ttl_seconds = ttl_seconds
+        self._clock = clock
+        self._entries: OrderedDict[StoreKey, tuple[StoreValue, float]] = OrderedDict()
+
+    def _purge_expired(self, now: float) -> None:
+        expired_keys = [key for key, (_, expires_at) in self._entries.items() if expires_at <= now]
+        for key in expired_keys:
+            del self._entries[key]
+
+    def get(self, key: StoreKey) -> StoreValue | None:
+        now = self._clock()
+        self._purge_expired(now)
+        entry = self._entries.get(key)
+        if entry is None:
+            return None
+        self._entries.move_to_end(key)
+        return entry[0]
+
+    def set(self, key: StoreKey, value: StoreValue) -> None:
+        now = self._clock()
+        self._purge_expired(now)
+        self._entries.pop(key, None)
+        while len(self._entries) >= self._max_size:
+            self._entries.popitem(last=False)
+        self._entries[key] = (value, now + self._ttl_seconds)
 
 
 class CreateConversationRequest(BaseModel):
@@ -147,7 +195,10 @@ def create_app(
     )
     gateway = gateway or OpenRouterGateway(os.environ["OPENROUTER_API_KEY"])
     event_broker = GenerationEventBroker()
-    idempotency: dict[tuple[str, str], str] = {}
+    idempotency = _BoundedTTLStore[tuple[str, str], str](
+        max_size=IDEMPOTENCY_MAX_ENTRIES,
+        ttl_seconds=IDEMPOTENCY_TTL_SECONDS,
+    )
     background_tasks: set[asyncio.Task[None]] = set()
 
     @asynccontextmanager
@@ -421,9 +472,11 @@ def create_app(
         idempotency_key: Annotated[str | None, Header()] = None,
     ) -> dict:
         try:
-            if idempotency_key and (conversation_id, idempotency_key) in idempotency:
-                await chat_service.get_conversation(principal, conversation_id)
-                return {"generation_id": idempotency[(conversation_id, idempotency_key)]}
+            if idempotency_key:
+                cached_generation_id = idempotency.get((conversation_id, idempotency_key))
+                if cached_generation_id is not None:
+                    await chat_service.get_conversation(principal, conversation_id)
+                    return {"generation_id": cached_generation_id}
             generation = await chat_service.start_turn(
                 principal, conversation_id, request.text, model
             )
@@ -432,7 +485,7 @@ def create_app(
         except GenerationAlreadyRunning as error:
             raise HTTPException(409, str(error)) from error
         if idempotency_key:
-            idempotency[(conversation_id, idempotency_key)] = generation.id
+            idempotency.set((conversation_id, idempotency_key), generation.id)
         task = asyncio.create_task(run_generation(conversation_id, generation))
         background_tasks.add(task)
         task.add_done_callback(background_tasks.discard)
@@ -529,7 +582,7 @@ def create_app(
         return StreamingResponse(
             events(),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
         )
 
     app.frontend("/", directory=str(Path(__file__).parent / "static"))
