@@ -62,7 +62,7 @@ async def test_conversation_repository_filters_by_owner():
     await repository.save(Conversation.create("second", "owner-2", now))
 
     assert [item.id for item in await repository.list("owner-1")] == ["first"]
-    assert {item.id for item in await repository.list()} == {"first", "second"}
+    assert {item.id for item in await repository.list(None)} == {"first", "second"}
     await engine.dispose()
 
 

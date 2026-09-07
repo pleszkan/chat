@@ -62,6 +62,14 @@ class SnapshotDeltaBroker(GenerationEventBroker):
         return queue
 
 
+class RetainedDeltaBroker(GenerationEventBroker):
+    def subscribe(self, generation_id: str):
+        queue = super().subscribe(generation_id)
+        queue.put_nowait({"event": "delta", "text": "not-in-snapshot"})
+        queue.put_nowait({"event": "completed"})
+        return queue
+
+
 class FakeProvider:
     id = "discord"
     display_name = "Discord"
@@ -354,11 +362,9 @@ def test_regular_users_are_isolated_while_admin_can_access_all_chats(tmp_path: P
             owner_transcript = client.get(
                 f"/v1/conversations/{conversation['id']}", headers=bearer(first_token)
             ).json()
-            if (
-                owner_transcript["generations"][0]["status"] == "completed"
-                or time.monotonic() >= deadline
-            ):
+            if owner_transcript["generations"][0]["status"] == "completed":
                 break
+            assert time.monotonic() < deadline
             time.sleep(0.01)
         client.cookies.clear()
         provider.subject = "discord-user-2"
@@ -406,11 +412,9 @@ def test_regular_users_are_isolated_while_admin_can_access_all_chats(tmp_path: P
             admin_transcript = client.get(
                 f"/v1/conversations/{conversation['id']}", headers=bearer(admin_token)
             ).json()
-            if (
-                admin_transcript["generations"][-1]["status"] == "completed"
-                or time.monotonic() >= deadline
-            ):
+            if admin_transcript["generations"][-1]["status"] == "completed":
                 break
+            assert time.monotonic() < deadline
             time.sleep(0.01)
         admin_delete = client.delete(
             f"/v1/conversations/{conversation['id']}", headers=bearer(admin_token)
@@ -524,6 +528,23 @@ def test_sse_does_not_replay_deltas_already_in_rechecked_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setattr(api_module, "GenerationEventBroker", SnapshotDeltaBroker)
+    original_get = api_module.SqlAlchemyConversationRepository.get
+    assistant_reads = 0
+
+    async def get_with_snapshot(repository, conversation_id: str):
+        nonlocal assistant_reads
+        conversation = await original_get(repository, conversation_id)
+        if (
+            conversation is not None
+            and conversation.messages
+            and conversation.messages[-1].role.value == "assistant"
+        ):
+            assistant_reads += 1
+            if assistant_reads == 3:
+                conversation.messages[-1].text = "already-in-snapshot"
+        return conversation
+
+    monkeypatch.setattr(api_module.SqlAlchemyConversationRepository, "get", get_with_snapshot)
     app, _, _ = make_app(tmp_path, BlockingGateway())
 
     with TestClient(app, base_url="https://chat.example") as client:
@@ -541,6 +562,30 @@ def test_sse_does_not_replay_deltas_already_in_rechecked_snapshot(
         )
 
     assert "event: delta" not in events.text
+
+
+def test_sse_retains_deltas_missing_from_rechecked_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(api_module, "GenerationEventBroker", RetainedDeltaBroker)
+    app, _, _ = make_app(tmp_path, BlockingGateway())
+
+    with TestClient(app, base_url="https://chat.example") as client:
+        token = login(client)
+        conversation = client.post("/v1/conversations", json={}, headers=bearer(token)).json()
+        accepted = client.post(
+            f"/v1/conversations/{conversation['id']}/messages",
+            json={"text": "Hi"},
+            headers=bearer(token),
+        )
+        events = client.get(
+            f"/v1/generations/{accepted.json()['generation_id']}/events",
+            params={"conversation_id": conversation["id"]},
+            headers=bearer(token),
+        )
+
+    assert 'event: delta\ndata: {"text": "not-in-snapshot"}' in events.text
+    assert events.text.index("event: delta") < events.text.index("event: completed")
 
 
 def test_provider_failure_retains_partial_assistant_output(tmp_path: Path):

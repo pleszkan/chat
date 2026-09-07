@@ -75,11 +75,12 @@
     let refreshPromise = null;
     let conversationId;
 
-    function showSignedOut() {
+    async function showSignedOut() {
       accessToken = null;
       conversationId = undefined;
       chatShell.hidden = true;
       signedOut.hidden = false;
+      await renderProviders();
     }
 
     function showSignedIn(user) {
@@ -114,7 +115,7 @@
       if (response.status !== 401 || !retry) return response;
       accessToken = null;
       if (!await refreshAccess()) {
-        showSignedOut();
+        await showSignedOut();
         return response;
       }
       return apiFetch(url, options, false);
@@ -190,21 +191,25 @@
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
-      while (true) {
-        const { value, done } = await reader.read();
-        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-        const frames = buffer.split('\n\n');
-        buffer = frames.pop();
-        for (const frame of frames) {
-          let eventName = 'message';
-          const data = [];
-          for (const line of frame.split('\n')) {
-            if (line.startsWith('event:')) eventName = line.slice(6).trim();
-            if (line.startsWith('data:')) data.push(line.slice(5).trimStart());
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+          const frames = buffer.split('\n\n');
+          buffer = frames.pop();
+          for (const frame of frames) {
+            let eventName = 'message';
+            const data = [];
+            for (const line of frame.split('\n')) {
+              if (line.startsWith('event:')) eventName = line.slice(6).trim();
+              if (line.startsWith('data:')) data.push(line.slice(5).trimStart());
+            }
+            if (handlers[eventName]) handlers[eventName](JSON.parse(data.join('\n') || '{}'));
           }
-          if (handlers[eventName]) handlers[eventName](JSON.parse(data.join('\n') || '{}'));
+          if (done) return;
         }
-        if (done) return;
+      } finally {
+        await reader.cancel().catch(() => {});
       }
     }
 
@@ -263,14 +268,12 @@
         status.textContent = 'Could not log out. Please try again.';
         return;
       }
-      showSignedOut();
-      await renderProviders();
+      await showSignedOut();
     });
 
     async function bootstrap() {
       if (!await refreshAccess()) {
-        showSignedOut();
-        await renderProviders();
+        await showSignedOut();
         return;
       }
       const conversations = await refreshConversations();
@@ -278,9 +281,8 @@
       else await createConversation();
     }
 
-    bootstrap().catch(() => {
-      showSignedOut();
-      renderProviders();
+    bootstrap().catch(async () => {
+      await showSignedOut();
     });
   </script>
 </body>

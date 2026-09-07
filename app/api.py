@@ -151,9 +151,12 @@ def create_app(
         await create_schema(engine)
         await auth_repository.cleanup_expired(clock())
         yield
-        for task in background_tasks:
+        tasks = tuple(background_tasks)
+        for task in tasks:
             if not task.done():
                 task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         await engine.dispose()
 
     app = FastAPI(title="Hexagonal Chat API", lifespan=lifespan)
@@ -441,6 +444,7 @@ def create_app(
         assistant = next(
             item for item in conversation.messages if item.id == generation.assistant_message_id
         )
+        snapshot_base_text = assistant.text
         queue = (
             event_broker.subscribe(generation_id)
             if generation.status is GenerationStatus.RUNNING
@@ -469,7 +473,9 @@ def create_app(
                 if item.id == generation.assistant_message_id
             )
             # Deltas published before the refreshed snapshot are already represented in it.
+            retained_events: list[dict] = []
             terminal_event: dict | None = None
+            snapshot_offset = len(snapshot_base_text)
             while True:
                 try:
                     pending_event = queue.get_nowait()
@@ -477,6 +483,17 @@ def create_app(
                     break
                 if pending_event["event"] in {"completed", "failed"}:
                     terminal_event = pending_event
+                elif pending_event["event"] == "delta":
+                    delta_text = pending_event["text"]
+                    delta_offset = assistant.text.find(delta_text, snapshot_offset)
+                    if delta_offset == -1:
+                        retained_events.append(pending_event)
+                    else:
+                        snapshot_offset = delta_offset + len(delta_text)
+                else:
+                    retained_events.append(pending_event)
+            for retained_event in retained_events:
+                queue.put_nowait(retained_event)
             if terminal_event is not None:
                 queue.put_nowait(terminal_event)
 

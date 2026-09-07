@@ -232,7 +232,7 @@ class SqlAlchemyConversationRepository:
                 ],
             )
 
-    async def list(self, owner_id: str | None = None) -> list[Conversation]:
+    async def list(self, owner_id: str | None) -> list[Conversation]:
         async with self.sessions() as session:
             query = select(ConversationRow.id)
             if owner_id is not None:

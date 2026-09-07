@@ -17,7 +17,7 @@ class MemoryRepository:
     async def get(self, conversation_id: str) -> Conversation | None:
         return self.conversations.get(conversation_id)
 
-    async def list(self, owner_id: str | None = None) -> list[Conversation]:
+    async def list(self, owner_id: str | None) -> list[Conversation]:
         return [
             item
             for item in self.conversations.values()
